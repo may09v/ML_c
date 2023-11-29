@@ -17,6 +17,10 @@
 
 // float d[] = {0, 1, 0, 1};
 // Mat m = {.rows = 4, .cols = 1, .es = d};
+#define ARRAY_LEN(xs) sizeof((xs))/sizeof((xs)[0])
+
+float rand_float(void);
+float sigmoidf(float x);
 
 typedef struct{
     size_t rows;
@@ -27,9 +31,6 @@ typedef struct{
 
 #define MAT_AT(m, i, j) (m).es[(i)*(m).stride + (j)]
 
-float rand_float(void);
-float sigmoidf(float x);
-
 Mat mat_alloc(size_t rows, size_t cols);
  //used to pass values in the objects of struct
 void mat_rand(Mat m, float low, float high);
@@ -39,9 +40,29 @@ void mat_dot(Mat dst, Mat a, Mat b);
 void mat_sum(Mat dst, Mat a); //42:44
 void mat_sig(Mat m);
 void mat_fill(Mat m, float x);
-void mat_print(Mat m,const char *name);
+void mat_print(Mat m,const char *name, size_t padding);
 
-#define MAT_PRINT(m) mat_print(m, #m) // 1:19:45
+#define MAT_PRINT(m) mat_print(m, #m, 0) // 1:19:45
+
+typedef struct {
+    size_t count;
+    Mat *ws;
+    Mat *bs;
+    Mat *as; // The amount of activations is count + 1
+} NN;
+
+#define NN_INPUT(nn) (nn).as[0]
+#define NN_OUTPUT(nn) (nn).as[(nn).count]
+
+NN nn_alloc(size_t *arch, size_t arch_count);
+
+void nn_print(NN nn, const char *name);
+#define NN_PRINT(nn) nn_print(nn, #nn);
+void nn_rand(NN nn, float low, float high);
+void nn_forward(NN nn);
+void nn_backprop(NN nn, NN g, Mat ti, Mat to);
+void nn_learn(NN nn, NN g, float rate);
+
 
 #endif // NN_H_
 
@@ -127,16 +148,17 @@ void mat_sig(Mat m)
     }
 }
 
-void mat_print(Mat m, const char *name)
+void mat_print(Mat m, const char *name, size_t padding)
 {
-    printf("%s = [\n", name);
+    printf("%*s%s = [\n", (int) padding, "", name); //creates empty string of size=padding hence resulting space.
     for(size_t i = 0; i < m.rows; ++i){
+        printf("%*s    ", (int) padding, "");
         for(size_t j = 0; j<m.cols; ++j){
-            printf("    %f", MAT_AT(m, i, j)); //53:25
+            printf("%f ", MAT_AT(m, i, j)); //53:25
         }
         printf("\n");
     }
-    printf("]\n");
+    printf("%*s]\n", (int) padding, "");
 }
 
 void mat_fill(Mat m, float x){
@@ -155,5 +177,110 @@ void mat_rand(Mat m, float low, float high)
         }//1:00:55
     }
 }
+//size_t arch[] = {2, 2, 1};
+//NN nn = nn_alloc(arch, ARRAY_LEN(arch));
 
+NN nn_alloc(size_t *arch, size_t arch_count)
+{
+    NN_ASSERT(arch_count > 0);
+
+    NN nn;
+    nn.count = arch_count - 1;
+    
+    nn.ws = NN_MALLOC(sizeof(*nn.ws)*nn.count);
+    NN_ASSERT(nn.ws != NULL);
+
+    nn.bs = NN_MALLOC(sizeof(*nn.bs)*nn.count);
+    NN_ASSERT(nn.bs != NULL);
+
+    nn.as = NN_MALLOC(sizeof(*nn.as)*nn.count + 1);
+    NN_ASSERT(nn.as != NULL);
+
+    nn.as[0] = mat_alloc(1, arch[0]);
+    for(size_t i = 1; i < arch_count; ++i){
+        nn.ws[i-1] = mat_alloc(nn.as[i-1].cols, arch[i]);
+        nn.bs[i-1] = mat_alloc(1, arch[i]); //****2~22~14
+        nn.as[i] = mat_alloc(1, arch[i]);
+    }
+    return nn;   
+}
+
+void nn_print(NN nn, const char *name)
+{   
+    char buf[256];
+    printf("%s = [\n", name);
+    for(size_t i = 0; i< nn.count; ++i){
+        snprintf(buf, sizeof(buf), "ws%zu", i);
+        mat_print(nn.ws[i], buf, 4);
+        snprintf(buf, sizeof(buf), "bs%zu", i);
+        mat_print(nn.bs[i], buf, 4);
+    }
+    printf("]\n");
+}
+
+void nn_rand(NN nn, float low, float high)
+{
+    for(size_t i = 0; i<nn.count; ++i){
+        mat_rand(nn.ws[i], low, high);
+        mat_rand(nn.bs[i], low, high);
+    }
+}
+void nn_forward(NN nn)
+{
+    for (size_t i = 0; i < nn.count; ++i) {
+        mat_dot(nn.as[i+1], nn.as[i], nn.ws[i]);
+        mat_sum(nn.as[i+1], nn.bs[i]);
+        mat_sig(nn.as[i+1]);
+    }
+}
+void nn_backprop(NN nn, NN g, Mat ti, Mat to)
+{
+    NN_ASSERT(ti.rows == to.rows);
+    size_t n = ti.rows;
+   // NN_ASSERT(NN_OUTPUT(n).cols == to.cols);
+
+    // i - current sample
+    // l - current layer
+    // j - current activation
+    // k - previous activation
+
+    for(size_t i = 0; i<n; ++i){
+        mat_copy(NN_INPUT(nn), mat_row(ti, i));
+        nn_forward(nn);
+        //NN_OUTPUT(nn) == mat_row(to, i);
+        for(size_t j = 0; j<to.cols; ++j){
+            MAT_AT(NN_OUTPUT(g), 0, j) = 
+            MAT_AT(NN_OUTPUT(nn), 0, j) - MAT_AT(to, i, j);
+        }
+        for(size_t l = nn.count; l>0; --l){
+           for(size_t j = 0; j<nn.as[l].cols; ++j){
+            float a = MAT_AT(nn.as[l], 0, j);
+            float da = MAT_AT(g.as[l], 0, j);
+
+            MAT_AT(g.bs[l-1],0, j) += 2*da*a*(1-a);
+
+            for(size_t k = 0; k < nn.as[l-1].cols; ++k){
+                // j = weight matrix col
+                // k = weight matrix row
+                float pa = MAT_AT(nn.as[l-1], 0, k);
+                float w = MAT_AT(nn.as[l-1], k, j);
+                MAT_AT(g.ws[l-1], k, j) += 2*da*a*(1 - a)*pa;
+                MAT_AT(g.as[l-1], 0, k) += 2*da*a*(1 - a)*w;
+             }
+           }        
+        }
+    }
+    for(size_t i = 0; i < g.count; ++i){
+        for(size_t j = 0; j < g.ws[i].rows; ++j){
+            for(size_t k = 0; k < g.ws[i].cols; ++k){
+                MAT_AT(g.ws[i], j, k) /= n;
+            }
+        }
+        for(size_t j = 0; j < g.count; ++j){
+            for(size_t k = 0; k < g.ws[i].rows; ++k){
+                MAT_AT(g.bs[i], j, k) /= n;
+            }
+        }
+    }
+}
 #endif // NN_IMPLEMENTATION
